@@ -37,6 +37,13 @@ type Decoder interface {
 	Decode(value string) error
 }
 
+// KeyedDecoder has the same semantics as Decoder, but additionally accepts the
+// field's derived key.
+// KeyedDecoder takes precedence over Decoder.
+type KeyedDecoder interface {
+	DecodeWithKey(key, value string) error
+}
+
 // Setter is implemented by types can self-deserialize values.
 // Any type that implements flag.Value also implements Setter.
 type Setter interface {
@@ -124,7 +131,7 @@ func gatherInfo(prefix string, spec interface{}) ([]varInfo, error) {
 
 		if f.Kind() == reflect.Struct {
 			// honor Decode if present
-			if decoderFrom(f) == nil && setterFrom(f) == nil && textUnmarshaler(f) == nil && binaryUnmarshaler(f) == nil  {
+			if decoderFrom(f) == nil && keyedDecoderFrom(f) == nil && setterFrom(f) == nil && textUnmarshaler(f) == nil && binaryUnmarshaler(f) == nil  {
 				innerPrefix := prefix
 				if !ftype.Anonymous {
 					innerPrefix = info.Key
@@ -200,10 +207,9 @@ func Process(prefix string, spec interface{}) error {
 			if isTrue(req) {
 				return fmt.Errorf("required key %s missing value", info.Key)
 			}
-			continue
 		}
 
-		err = processField(value, info.Field)
+		err = processField(info.Key, value, info.Field)
 		if err != nil {
 			return &ParseError{
 				KeyName:   info.Key,
@@ -225,13 +231,17 @@ func MustProcess(prefix string, spec interface{}) {
 	}
 }
 
-func processField(value string, field reflect.Value) error {
+func processField(key, value string, field reflect.Value) error {
 	typ := field.Type()
 
+	keyedDecoder := keyedDecoderFrom(field)
 	decoder := decoderFrom(field)
-	if decoder != nil {
+	if keyedDecoder != nil {
+		return keyedDecoder.DecodeWithKey(key, value)
+	} else if decoder != nil {
 		return decoder.Decode(value)
 	}
+
 	// look for Set method if Decode not defined
 	setter := setterFrom(field)
 	if setter != nil {
@@ -296,7 +306,7 @@ func processField(value string, field reflect.Value) error {
 		vals := strings.Split(value, ",")
 		sl := reflect.MakeSlice(typ, len(vals), len(vals))
 		for i, val := range vals {
-			err := processField(val, sl.Index(i))
+			err := processField(key, val, sl.Index(i))
 			if err != nil {
 				return err
 			}
@@ -312,12 +322,12 @@ func processField(value string, field reflect.Value) error {
 					return fmt.Errorf("invalid map item: %q", pair)
 				}
 				k := reflect.New(typ.Key()).Elem()
-				err := processField(kvpair[0], k)
+				err := processField(key, kvpair[0], k)
 				if err != nil {
 					return err
 				}
 				v := reflect.New(typ.Elem()).Elem()
-				err = processField(kvpair[1], v)
+				err = processField(key, kvpair[1], v)
 				if err != nil {
 					return err
 				}
@@ -344,6 +354,11 @@ func interfaceFrom(field reflect.Value, fn func(interface{}, *bool)) {
 
 func decoderFrom(field reflect.Value) (d Decoder) {
 	interfaceFrom(field, func(v interface{}, ok *bool) { d, *ok = v.(Decoder) })
+	return d
+}
+
+func keyedDecoderFrom(field reflect.Value) (d KeyedDecoder) {
+	interfaceFrom(field, func(v interface{}, ok *bool) { d, *ok = v.(KeyedDecoder) })
 	return d
 }
 
